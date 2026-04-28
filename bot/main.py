@@ -6,6 +6,7 @@ from telegram.ext import (
 
 from . import config, database as db
 from .reminders import reminders_loop
+from .backup import backup_loop
 from .handlers.admin import (
     newmatch_handler, newmatch_dm_handler, edit_match_handler,
     editmatch, cancelmatch, closematch, restorematch, list_matches,
@@ -27,6 +28,7 @@ log = logging.getLogger(__name__)
 async def post_init(app: Application):
     await db.init()
     app.create_task(reminders_loop(app))
+    app.create_task(backup_loop())
 
 
 async def post_shutdown(app: Application):
