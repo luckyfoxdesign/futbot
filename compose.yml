@@ -1,0 +1,16 @@
+services:
+  bot:
+    build: .
+    container_name: c-futbot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - flask-network
+
+networks:
+  flask-network:
+    external: true
