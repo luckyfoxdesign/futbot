@@ -244,6 +244,7 @@ def newmatch_handler() -> CommandHandler:
 # ──────────────────────────── /newmatch (DM) ────────────────────────────
 
 async def newmatch_dm_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log.info("newmatch_dm_start called: user_id=%s is_admin=%s", update.effective_user.id, _is_admin(update.effective_user.id))
     if not _is_admin(update.effective_user.id):
         return ConversationHandler.END
 
