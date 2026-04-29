@@ -6,8 +6,10 @@ from telegram.ext import (
 )
 
 from . import config, database as db
+from .observability import timed_handler
 from .reminders import reminders_loop
 from .backup import backup_loop
+from .tasks import cancel_background_tasks as cancel_tracked_background_tasks
 from .handlers.admin import (
     newmatch_handler, newmatch_dm_handler, edit_match_handler,
     editmatch, cancelmatch, closematch, restorematch, list_matches,
@@ -40,6 +42,7 @@ async def _run_background_tasks(app: Application):
 
 
 async def _cancel_background_tasks(app: Application):
+    await cancel_tracked_background_tasks(app)
     tasks = app.bot_data.pop(_BACKGROUND_TASKS_KEY, [])
     for task in tasks:
         task.cancel()
@@ -49,6 +52,17 @@ async def _cancel_background_tasks(app: Application):
 
 async def post_init(app: Application):
     await db.init()
+    try:
+        info = await app.bot.get_webhook_info()
+        log.info(
+            "webhook_info url_set=%s pending_update_count=%s last_error_date=%s last_error_message=%s",
+            bool(info.url),
+            info.pending_update_count,
+            info.last_error_date,
+            info.last_error_message,
+        )
+    except Exception:
+        log.exception("Could not fetch webhook info")
     app.bot_data[_BACKGROUND_TASKS_KEY] = [
         asyncio.create_task(_run_background_tasks(app), name="background_tasks"),
     ]
@@ -75,6 +89,9 @@ def _webhook_path() -> str:
 
 
 def main():
+    def h(name, handler):
+        return timed_handler(name, handler)
+
     app = (
         Application.builder()
         .token(config.BOT_TOKEN)
@@ -87,22 +104,43 @@ def main():
     app.add_handler(newmatch_dm_handler())
     app.add_handler(newmatch_handler())
     app.add_handler(edit_match_handler())
-    app.add_handler(CommandHandler("editmatch", editmatch))
-    app.add_handler(CommandHandler("cancelmatch", cancelmatch))
-    app.add_handler(CommandHandler("closematch", closematch))
-    app.add_handler(CommandHandler("restorematch", restorematch))
-    app.add_handler(CommandHandler("matches", list_matches))
+    app.add_handler(CommandHandler("editmatch", h("editmatch", editmatch)))
+    app.add_handler(CommandHandler("cancelmatch", h("cancelmatch", cancelmatch)))
+    app.add_handler(CommandHandler("closematch", h("closematch", closematch)))
+    app.add_handler(CommandHandler("restorematch", h("restorematch", restorematch)))
+    app.add_handler(CommandHandler("matches", h("matches", list_matches)))
 
-    app.add_handler(CallbackQueryHandler(handle_join, pattern=r"^join_\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_leave, pattern=r"^leave_\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_join_reserve, pattern=r"^joinreserve_\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_leave_reserve, pattern=r"^leavereserve_\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_options, pattern=r"^options_\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_options_back, pattern=r"^optback_\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_options_delete, pattern=r"^optdelete_\d+$"))
-    app.add_handler(CallbackQueryHandler(handle_options_delete_confirm, pattern=r"^optdelconfirm_\d+$"))
+    app.add_handler(CallbackQueryHandler(
+        h("join", handle_join), pattern=r"^join_\d+$", block=False,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        h("leave", handle_leave), pattern=r"^leave_\d+$", block=False,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        h("join_reserve", handle_join_reserve), pattern=r"^joinreserve_\d+$", block=False,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        h("leave_reserve", handle_leave_reserve), pattern=r"^leavereserve_\d+$", block=False,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        h("options", handle_options), pattern=r"^options_\d+$", block=False,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        h("options_back", handle_options_back), pattern=r"^optback_\d+$", block=False,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        h("options_delete", handle_options_delete), pattern=r"^optdelete_\d+$", block=False,
+    ))
+    app.add_handler(CallbackQueryHandler(
+        h("options_delete_confirm", handle_options_delete_confirm),
+        pattern=r"^optdelconfirm_\d+$",
+        block=False,
+    ))
 
-    app.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE, handle_contact_received))
+    app.add_handler(MessageHandler(
+        filters.CONTACT & filters.ChatType.PRIVATE,
+        h("contact_received", handle_contact_received),
+    ))
 
     if config.WEBHOOK_URL:
         log.info("Starting bot in webhook mode...")

@@ -9,6 +9,7 @@ from ..models import Match
 from ..keyboards import match_keyboard
 from ..message_builder import build_announce
 from ..promotion import promote_first_reserve, notify_promoted
+from ..tasks import create_background_task
 from .notifications import notify_penalty
 
 log = logging.getLogger(__name__)
@@ -59,6 +60,10 @@ async def _rebuild_message(app, match: Match):
         )
     except Exception:
         log.exception("Failed to edit match message %s", match.message_id)
+
+
+def _schedule_rebuild_message(app, match: Match) -> None:
+    create_background_task(app, _rebuild_message(app, match), f"rebuild_match_{match.id}")
 
 
 async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,8 +120,8 @@ async def handle_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _do_join(app, match: Match, user_id: int, display_name: str,
                    contact: str, contact_type: str, force_reserve: bool = False):
     now = _now_iso()
-    await db._db.execute("BEGIN IMMEDIATE")
-    try:
+
+    async def operation() -> None:
         main_count = await db.count_main(match.id)
         if not force_reserve and main_count < match.max_players:
             slot_type = "main"
@@ -131,12 +136,9 @@ async def _do_join(app, match: Match, user_id: int, display_name: str,
             match.id, user_id, contact, contact_type, display_name,
             slot_type, slot_number, main_since, commit=False
         )
-        await db._db.commit()
-    except Exception:
-        await db._db.rollback()
-        raise
 
-    await _rebuild_message(app, match)
+    await db.execute_immediate(operation)
+    _schedule_rebuild_message(app, match)
 
 
 async def handle_contact_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -256,7 +258,7 @@ async def handle_leave_reserve(update: Update, context: ContextTypes.DEFAULT_TYP
 
     now = _now_iso()
     await db.cancel_registration(reg.id, now)
-    await _rebuild_message(context.application, match)
+    _schedule_rebuild_message(context.application, match)
 
 
 async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -284,8 +286,7 @@ async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
         and _is_penalty_applicable(reg.main_since, match.kickoff_at, config.TIMEZONE)
     )
 
-    await db._db.execute("BEGIN IMMEDIATE")
-    try:
+    async def operation():
         if apply_penalty:
             await db.set_penalty(reg.id, now, commit=False)
         else:
@@ -294,17 +295,23 @@ async def handle_leave(update: Update, context: ContextTypes.DEFAULT_TYPE):
         promoted_reg = None
         if is_main:
             promoted, promoted_reg = await promote_first_reserve(match)
-        await db._db.commit()
-    except Exception:
-        await db._db.rollback()
-        raise
+        return promoted_reg
+
+    promoted_reg = await db.execute_immediate(operation)
 
     if apply_penalty:
-        await notify_penalty(context.application.bot, user.id, match.date, match.field)
+        create_background_task(
+            context.application,
+            notify_penalty(context.application.bot, user.id, match.date, match.field),
+            f"notify_penalty_{match.id}_{user.id}",
+        )
 
     if is_main and promoted_reg:
-        await notify_promoted(context.application, promoted_reg, match)
+        create_background_task(
+            context.application,
+            notify_promoted(context.application, promoted_reg, match),
+            f"notify_promoted_{match.id}_{promoted_reg.user_id}",
+        )
 
-    await _rebuild_message(context.application, match)
-
+    _schedule_rebuild_message(context.application, match)
 

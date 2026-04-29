@@ -25,19 +25,7 @@ async def promote_first_reserve(match: Match) -> tuple[bool, Registration | None
 
     await db.promote_to_main(reserve.id, new_slot, now, commit=False)
 
-    async with db._db.execute(
-        "SELECT * FROM registrations WHERE id=?", (reserve.id,)
-    ) as cur:
-        row = await cur.fetchone()
-
-    updated = Registration(
-        id=row["id"], match_id=row["match_id"], user_id=row["user_id"],
-        contact=row["contact"], contact_type=row["contact_type"],
-        display_name=row["display_name"], slot_type="main",
-        slot_number=new_slot, status=row["status"],
-        joined_at=row["joined_at"], main_since=now,
-        cancelled_at=row["cancelled_at"],
-    )
+    updated = await db.get_registration(reserve.id)
     return True, updated
 
 
@@ -46,19 +34,16 @@ async def promote_reserve_to_capacity(match: Match) -> list[Registration]:
     Promote active reserve players until main reaches match.max_players.
     Opens its own transaction and returns promoted registrations for notifications.
     """
-    promoted: list[Registration] = []
-    await db._db.execute("BEGIN IMMEDIATE")
-    try:
+    async def operation() -> list[Registration]:
+        promoted: list[Registration] = []
         while await db.count_main(match.id) < match.max_players:
             did_promote, promoted_reg = await promote_first_reserve(match)
             if not did_promote or promoted_reg is None:
                 break
             promoted.append(promoted_reg)
-        await db._db.commit()
-    except Exception:
-        await db._db.rollback()
-        raise
-    return promoted
+        return promoted
+
+    return await db.execute_immediate(operation)
 
 
 async def notify_promoted(app, reg: Registration, match: Match):

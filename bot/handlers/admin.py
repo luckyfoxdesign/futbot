@@ -11,7 +11,9 @@ from telegram.ext import (
 from .. import database as db, config
 from ..keyboards import match_keyboard, options_keyboard, delete_confirm_keyboard
 from ..message_builder import build_announce
+from ..observability import timed_handler
 from ..promotion import promote_reserve_to_capacity, notify_promoted
+from ..tasks import create_background_task
 from ..handlers.notifications import notify_cancellation
 
 log = logging.getLogger(__name__)
@@ -201,13 +203,30 @@ async def _publish_match(app, data: dict) -> int:
     return match_id
 
 
+async def _edit_cancelled_message(bot, match_id: int, match) -> None:
+    if not match.message_id:
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=match.chat_id,
+            message_id=match.message_id,
+            text=f"❌ Матч #{match_id} · {match.date}, {match.weekday} — {match.field} ОТМЕНЁН.",
+        )
+    except Exception:
+        log.exception("could not edit cancelled match message")
+
+
 async def _promote_after_capacity_increase(app, before, after):
     if after.status != "open" or after.max_players <= before.max_players:
         return
 
     promoted_regs = await promote_reserve_to_capacity(after)
     for reg in promoted_regs:
-        await notify_promoted(app, reg, after)
+        create_background_task(
+            app,
+            notify_promoted(app, reg, after),
+            f"notify_promoted_{after.id}_{reg.user_id}",
+        )
 
 
 # ──────────────────────────── /newmatch ────────────────────────────
@@ -238,7 +257,11 @@ async def newmatch_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def newmatch_handler() -> CommandHandler:
-    return CommandHandler("newmatch", newmatch_start, filters=filters.ChatType.GROUPS)
+    return CommandHandler(
+        "newmatch",
+        timed_handler("newmatch_group", newmatch_start),
+        filters=filters.ChatType.GROUPS,
+    )
 
 
 # ──────────────────────────── /newmatch (DM) ────────────────────────────
@@ -291,15 +314,20 @@ async def newmatch_dm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE)
 def newmatch_dm_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[CommandHandler(
-            "newmatch", newmatch_dm_start, filters=filters.ChatType.PRIVATE,
+            "newmatch",
+            timed_handler("newmatch_dm_start", newmatch_dm_start),
+            filters=filters.ChatType.PRIVATE,
         )],
         states={
             NM_FILL: [MessageHandler(
                 filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-                newmatch_dm_fill,
+                timed_handler("newmatch_dm_fill", newmatch_dm_fill),
             )],
         },
-        fallbacks=[CommandHandler("cancel", newmatch_dm_cancel)],
+        fallbacks=[CommandHandler(
+            "cancel",
+            timed_handler("newmatch_dm_cancel", newmatch_dm_cancel),
+        )],
         per_chat=True,
         per_user=True,
         allow_reentry=True,
@@ -366,17 +394,16 @@ async def handle_options_delete_confirm(update: Update, context: ContextTypes.DE
 
     user_ids = await db.get_all_active_user_ids(match_id)
     await db.update_match_fields(match_id, status="cancelled")
-    await notify_cancellation(context.application.bot, user_ids, match.date, match.field)
-
-    if match.message_id:
-        try:
-            await context.application.bot.edit_message_text(
-                chat_id=match.chat_id,
-                message_id=match.message_id,
-                text=f"❌ Матч #{match_id} · {match.date}, {match.weekday} — {match.field} ОТМЕНЁН.",
-            )
-        except Exception:
-            log.exception("delete via options: could not edit message")
+    create_background_task(
+        context.application,
+        notify_cancellation(context.application.bot, user_ids, match.date, match.field),
+        f"notify_cancellation_{match_id}",
+    )
+    create_background_task(
+        context.application,
+        _edit_cancelled_message(context.application.bot, match_id, match),
+        f"edit_cancelled_{match_id}",
+    )
 
 
 async def handle_options_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -470,14 +497,20 @@ async def edit_match_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def edit_match_handler() -> ConversationHandler:
     return ConversationHandler(
-        entry_points=[CallbackQueryHandler(handle_options_edit, pattern=r"^optedit_\d+$")],
+        entry_points=[CallbackQueryHandler(
+            timed_handler("edit_match_start", handle_options_edit),
+            pattern=r"^optedit_\d+$",
+        )],
         states={
             NM_EDIT_FILL: [MessageHandler(
                 filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-                nm_edit_fill,
+                timed_handler("edit_match_fill", nm_edit_fill),
             )],
         },
-        fallbacks=[CommandHandler("cancel", edit_match_cancel)],
+        fallbacks=[CommandHandler(
+            "cancel",
+            timed_handler("edit_match_cancel", edit_match_cancel),
+        )],
         per_chat=False,
         per_user=True,
     )
@@ -562,20 +595,18 @@ async def cancelmatch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_ids = await db.get_all_active_user_ids(match_id)
     await db.update_match_fields(match_id, status="cancelled")
+    create_background_task(
+        context.application,
+        notify_cancellation(context.application.bot, user_ids, match.date, match.field),
+        f"notify_cancellation_{match_id}",
+    )
+    create_background_task(
+        context.application,
+        _edit_cancelled_message(context.application.bot, match_id, match),
+        f"edit_cancelled_{match_id}",
+    )
 
-    await notify_cancellation(context.application.bot, user_ids, match.date, match.field)
-
-    if match.message_id:
-        try:
-            await context.application.bot.edit_message_text(
-                chat_id=match.chat_id,
-                message_id=match.message_id,
-                text=f"❌ Матч #{match_id} · {match.date}, {match.weekday} — {match.field} ОТМЕНЁН.",
-            )
-        except Exception:
-            log.exception("cancelmatch: could not edit message")
-
-    await update.message.reply_text("Матч отменён, все уведомлены.")
+    await update.message.reply_text("Матч отменён, уведомления отправляются.")
 
 
 # ──────────────────────────── /closematch ────────────────────────────

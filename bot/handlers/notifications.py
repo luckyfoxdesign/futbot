@@ -1,20 +1,48 @@
+import asyncio
 import logging
 from telegram import Bot
+from telegram.error import RetryAfter
 
 log = logging.getLogger(__name__)
+
+_SEND_CONCURRENCY = 5
+
+
+def _retry_delay(exc: RetryAfter) -> float:
+    retry_after = exc.retry_after
+    if hasattr(retry_after, "total_seconds"):
+        return retry_after.total_seconds()
+    return float(retry_after)
 
 
 async def send_safe(bot: Bot, chat_id: int, text: str, **kwargs):
     try:
         await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    except RetryAfter as exc:
+        delay = _retry_delay(exc)
+        log.warning("Telegram rate limit for %s; retrying after %.1fs", chat_id, delay)
+        await asyncio.sleep(delay)
+        try:
+            await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        except Exception:
+            log.exception("Could not send message to %s after retry", chat_id)
     except Exception:
         log.exception("Could not send message to %s", chat_id)
 
 
+async def send_many_safe(bot: Bot, chat_ids, text: str, **kwargs):
+    semaphore = asyncio.Semaphore(_SEND_CONCURRENCY)
+
+    async def send_one(chat_id: int):
+        async with semaphore:
+            await send_safe(bot, chat_id, text, **kwargs)
+
+    await asyncio.gather(*(send_one(uid) for uid in chat_ids))
+
+
 async def notify_cancellation(bot: Bot, user_ids: list[int], match_date: str, match_field: str):
     text = f"❌ Матч {match_date} на поле «{match_field}» отменён."
-    for uid in user_ids:
-        await send_safe(bot, uid, text)
+    await send_many_safe(bot, user_ids, text)
 
 
 def _plural_hours(n: int) -> str:
@@ -31,8 +59,7 @@ def _plural_hours(n: int) -> str:
 
 async def notify_reminder(bot: Bot, user_ids: list[int], match_date: str, match_field: str, hours: int):
     text = f"⏰ Напоминание: матч {match_date} на поле «{match_field}» — через {hours} {_plural_hours(hours)}!"
-    for uid in user_ids:
-        await send_safe(bot, uid, text)
+    await send_many_safe(bot, user_ids, text)
 
 
 async def notify_penalty(bot: Bot, user_id: int, match_date: str, match_field: str):
@@ -55,5 +82,4 @@ async def notify_penalty_summary(bot: Bot, admin_ids: set[int], match_date: str,
         f"{lines}\n\n"
         f"Эти игроки вышли после 12:00 — должны оплатить участие."
     )
-    for uid in admin_ids:
-        await send_safe(bot, uid, text)
+    await send_many_safe(bot, admin_ids, text)
