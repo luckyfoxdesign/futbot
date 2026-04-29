@@ -24,14 +24,40 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+_BACKGROUND_TASKS_KEY = "background_tasks"
+
+
+async def _run_background_tasks(app: Application):
+    while not app.running:
+        await asyncio.sleep(0.1)
+
+    await asyncio.gather(
+        reminders_loop(app),
+        backup_loop(),
+    )
+
+
+async def _cancel_background_tasks(app: Application):
+    tasks = app.bot_data.pop(_BACKGROUND_TASKS_KEY, [])
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 
 async def post_init(app: Application):
     await db.init()
-    app.create_task(reminders_loop(app))
-    app.create_task(backup_loop())
+    app.bot_data[_BACKGROUND_TASKS_KEY] = [
+        asyncio.create_task(_run_background_tasks(app), name="background_tasks"),
+    ]
+
+
+async def post_stop(app: Application):
+    await _cancel_background_tasks(app)
 
 
 async def post_shutdown(app: Application):
+    await _cancel_background_tasks(app)
     await db.close()
 
 
@@ -40,6 +66,7 @@ def main():
         Application.builder()
         .token(config.BOT_TOKEN)
         .post_init(post_init)
+        .post_stop(post_stop)
         .post_shutdown(post_shutdown)
         .build()
     )
