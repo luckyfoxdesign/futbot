@@ -302,6 +302,7 @@ def newmatch_dm_handler() -> ConversationHandler:
         fallbacks=[CommandHandler("cancel", newmatch_dm_cancel)],
         per_chat=True,
         per_user=True,
+        allow_reentry=True,
     )
 
 
