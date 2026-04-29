@@ -23,7 +23,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("telegram.ext").setLevel(logging.DEBUG)
 log = logging.getLogger(__name__)
 
 _BACKGROUND_TASKS_KEY = "background_tasks"
