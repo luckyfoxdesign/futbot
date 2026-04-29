@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from urllib.parse import urlparse
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters,
 )
@@ -62,6 +63,17 @@ async def post_shutdown(app: Application):
     await db.close()
 
 
+def _webhook_path() -> str:
+    if config.WEBHOOK_PATH:
+        return config.WEBHOOK_PATH.rsplit("/", 1)[-1]
+
+    parsed_path = urlparse(config.WEBHOOK_URL).path.rstrip("/")
+    if parsed_path:
+        return parsed_path.rsplit("/", 1)[-1]
+
+    raise RuntimeError("WEBHOOK_PATH must be set when WEBHOOK_URL has no path")
+
+
 def main():
     app = (
         Application.builder()
@@ -97,9 +109,8 @@ def main():
         app.run_webhook(
             listen="0.0.0.0",
             port=config.WEBHOOK_PORT,
-            url_path=config.WEBHOOK_SECRET or config.BOT_TOKEN,
+            url_path=_webhook_path(),
             webhook_url=config.WEBHOOK_URL,
-            secret_token=config.WEBHOOK_SECRET or None,
             drop_pending_updates=True,
         )
     else:
