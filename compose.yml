@@ -9,8 +9,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
     networks:
-      - flask-network
+      - internal_net
 
 networks:
-  flask-network:
+  internal_net:
     external: true
