@@ -262,7 +262,7 @@ async def count_reserve(match_id: int) -> int:
 async def next_slot_number(match_id: int, slot_type: str) -> int:
     async def operation() -> int:
         async with _connection().execute(
-            "SELECT MAX(slot_number) FROM registrations WHERE match_id=? AND slot_type=?",
+            "SELECT MAX(slot_number) FROM registrations WHERE match_id=? AND slot_type=? AND status='active'",
             (match_id, slot_type)
         ) as cur:
             row = await cur.fetchone()
